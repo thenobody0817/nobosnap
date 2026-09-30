@@ -198,8 +198,14 @@ void CaptureEditor::saveAsToPath(const QString &path) {
        previous = editingRecent_, document = pinDocument_,
        launcher = processLauncher_, path](QPromise<QString> &completion) {
     RecentSnapWriter recent(log.recentId);
-    const QImage image = renderCapture(capture, selection, annotations,
-                                       background, shadow, boundary, backdrop);
+    QImage image = renderCapture(capture, selection, annotations,
+                                background, shadow, boundary, backdrop);
+    QString embedError;
+    if (!embedNotesInCaptureRender(image, capture, selection, annotations,
+                                   background, boundary, embedError)) {
+      completion.addResult(embedError);
+      return;
+    }
     QString error;
     if (savePngFile(image, path, error)) {
       const QString preview = launchPinnedCapture(

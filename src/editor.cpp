@@ -811,6 +811,7 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
   startupTimingMark("palette config loaded");
   customColor_ = paletteConfig_.custom;
   backgroundConfig_ = loadBackgroundConfig(defaultConfigPath());
+  markerNotesMode_ = loadMarkerNotesMode(defaultConfigPath());
   connect(&backdropWatcher_, &QFutureWatcher<QImage>::finished, this,
           [this] { completeBackdropLoad(); });
   connect(&highlighterProbeWatcher_,
@@ -829,6 +830,26 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
     opIndex_ = std::clamp(log.index, 0, static_cast<int>(ops_.size()));
     nextAnnotationId_ = std::max<quint64>(log.nextId, 1);
     nextMarker_ = std::max(log.nextMarker, 1);
+    if (mode == CaptureMode::File) {
+      const bool hasAnnotations = std::any_of(
+          ops_.cbegin(), ops_.cend(), [](const Operation &op) {
+            return !op.annotations.isEmpty();
+          });
+      if (!hasAnnotations) {
+        QString importError;
+        const QVector<Annotation> imported =
+            importNotesFromImage(capture_.source, capture_, importError);
+        for (Annotation annotation : imported) {
+          annotation.id = nextAnnotationId_++;
+          nextMarker_ = std::max(nextMarker_, annotation.number + 1);
+          Operation op;
+          op.type = Operation::Type::Annotate;
+          op.annotations = {std::move(annotation)};
+          ops_.push_back(std::move(op));
+        }
+        opIndex_ = ops_.size();
+      }
+    }
   } else {
     // A genuinely fresh capture seeds its configured backdrop as the first
     // undoable operation. Arbitrary custom images load on the worker pool;
@@ -1167,6 +1188,27 @@ bool CaptureEditor::eventFilter(QObject *watched, QEvent *event) {
       if (textEditing() && !textEditor_->hasFocus() && !saveAsActive_)
         acceptText();
     });
+  } else if (watched == markerNoteEditor_) {
+    if (event->type() == QEvent::KeyPress) {
+      auto *key = static_cast<QKeyEvent *>(event);
+      if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+        if (key->modifiers().testFlag(Qt::ControlModifier)) {
+          acceptMarkerNote();
+          return true;
+        }
+        markerNoteEditor_->insertPlainText(QStringLiteral("\n"));
+        return true;
+      }
+      if (key->key() == Qt::Key_Escape) {
+        cancelMarkerNote();
+        return true;
+      }
+    } else if (event->type() == QEvent::FocusOut) {
+      QTimer::singleShot(0, this, [this] {
+        if (markerNoteOpen() && !markerNoteEditor_->hasFocus())
+          cancelMarkerNote();
+      });
+    }
   }
   return QWidget::eventFilter(watched, event);
 }
@@ -1204,17 +1246,19 @@ QRectF CaptureEditor::annotationBounds(const Annotation &annotation) const {
   return QRectF(annotation.start, annotation.end).normalized();
 }
 void CaptureEditor::selectAllAnnotations() {
-  if (annotations_.isEmpty()) {
+  selectedAnnotations_.clear();
+  for (int index = 0; index < annotations_.size(); ++index) {
+    if (!annotations_.at(index).flattened)
+      selectedAnnotations_.push_back(index);
+  }
+  if (selectedAnnotations_.isEmpty()) {
     setStatus(QStringLiteral("No layers to select"));
     return;
   }
-  selectedAnnotations_.clear();
-  for (int index = 0; index < annotations_.size(); ++index)
-    selectedAnnotations_.push_back(index);
-  selectedAnnotation_ = annotations_.size() - 1;
+  selectedAnnotation_ = selectedAnnotations_.constLast();
   tool_ = Tool::Select;
   setStatus(QStringLiteral("All %1 layers selected · Delete removes them")
-                .arg(annotations_.size()));
+                .arg(selectedAnnotations_.size()));
 }
 
 bool CaptureEditor::annotationSelected(int index) const {
@@ -1517,10 +1561,15 @@ QString CaptureEditor::toolStatus() const {
         .arg(annotationTextFontName(textFont_))
         .arg(QString::fromLatin1(
             kTextSizeNames.at(static_cast<std::size_t>(textSizeIndex_))));
-  case Tool::Marker:
-    return QStringLiteral("Marker · next %1 · size %2 · wheel resizes")
+  case Tool::Marker: {
+    const QString modeHint = markerNotesMode_
+                                 ? QStringLiteral("notes on \u00b7 ")
+                                 : QString();
+    return QStringLiteral("Marker \u00b7 %1next %2 \u00b7 size %3 \u00b7 wheel resizes")
+        .arg(modeHint)
         .arg(nextMarker_)
         .arg(size);
+  }
   case Tool::Ocr:
     return QStringLiteral("Copy text · drag over the words to copy them");
   case Tool::Eyedropper:
@@ -1650,6 +1699,8 @@ int CaptureEditor::annotationAt(const QPointF &point) const {
   for (const int layer : {0, 1, 2, 3, 4}) {
     for (int index = annotations_.size() - 1; index >= 0; --index) {
       const Annotation &annotation = annotations_.at(index);
+      if (annotation.flattened)
+        continue;
       const int annotationLayer =
           annotation.kind == Annotation::Kind::Marker      ? 0
           : annotation.kind == Annotation::Kind::Text      ? 1
@@ -1690,6 +1741,8 @@ int CaptureEditor::annotationEdgeAt(const QPointF &point) const {
   for (const int layer : {0, 1, 2, 3, 4}) {
     for (int index = annotations_.size() - 1; index >= 0; --index) {
       const Annotation &annotation = annotations_.at(index);
+      if (annotation.flattened)
+        continue;
       const int annotationLayer =
           annotation.kind == Annotation::Kind::Marker      ? 0
           : annotation.kind == Annotation::Kind::Text      ? 1
@@ -2309,6 +2362,8 @@ void CaptureEditor::resizeEvent(QResizeEvent *event) {
   clampViewOffset();
   if (textEditing())
     layoutTextEditor();
+  if (markerNoteOpen())
+    layoutMarkerNoteEditor();
   updatePointerCursor();
   update();
 }
@@ -2708,8 +2763,11 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
           .arg(stroke::maximumSmoothingLevel));
   add(36, QStringLiteral("tool-highlighter"), {}, highlighterTooltip());
   add(36, QStringLiteral("tool-marker"), {},
-      QStringLiteral("Number marker · C · Size %1 · Wheel")
+      QStringLiteral("Number marker \u00b7 C \u00b7 Size %1 \u00b7 Wheel")
           .arg(qRound(annotationSize_)));
+  add(36, QStringLiteral("marker-notes"),
+      markerNotesMode_ ? QStringLiteral("on") : QString(),
+      QStringLiteral("Number + directions \u00b7 N"));
   const QString fillHint = fillShapes_ ? QStringLiteral("filled") : QString();
   const bool ellipseSelected = tool_ == Tool::Ellipse;
   add(36, ellipseSelected ? QStringLiteral("tool-ellipse")
@@ -3490,9 +3548,16 @@ void CaptureEditor::pinSnapshot() {
        imageShadow, canvasBoundary, backdrop, launcher](QPromise<PinResult> &completion) {
         PinResult result;
         RecentSnapWriter recent(log.recentId);
-        const QImage image =
+        QImage image =
             renderCapture(captureCopy, selection, annotations, background,
                           imageShadow, canvasBoundary, backdrop);
+        QString embedError;
+        if (!embedNotesInCaptureRender(image, captureCopy, selection, annotations,
+                                       background, canvasBoundary, embedError)) {
+          result.error = embedError;
+          completion.addResult(result);
+          return;
+        }
         result.path = launchPinnedCapture(
             image, renderedCaptureLogicalSize(captureCopy, image.size()),
             false, PinLifetime::Persistent, result.error, launcher, log.recentId);
@@ -3583,6 +3648,10 @@ void CaptureEditor::enterExport() {
 }
 
 void CaptureEditor::handleEscape() {
+  if (markerNoteOpen()) {
+    cancelMarkerNote();
+    return;
+  }
   // Selecting: there is nothing to step back from, so one Esc closes (the
   // launch key then Esc is the quickest "never mind"). Only a drag in flight
   // is cancelled first. Editing: dismiss and return the document to its pin.
@@ -3942,6 +4011,148 @@ void CaptureEditor::acceptText(bool keepSelected) {
   update();
 }
 
+void CaptureEditor::toggleMarkerNotesMode() {
+  markerNotesMode_ = !markerNotesMode_;
+  saveMarkerNotesMode(defaultConfigPath(), markerNotesMode_);
+  setStatus(markerNotesMode_
+                ? QStringLiteral("Number + directions mode enabled · N toggles")
+                : QStringLiteral("Number + directions mode disabled · N toggles"));
+}
+
+void CaptureEditor::ensureMarkerNoteEditor() {
+  if (markerNoteEditor_)
+    return;
+  markerNoteEditor_ = new QPlainTextEdit(this);
+  markerNoteEditor_->setTabChangesFocus(false);
+  markerNoteEditor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  markerNoteEditor_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  markerNoteEditor_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  markerNoteEditor_->setStyleSheet(
+      QStringLiteral("QPlainTextEdit { color: #f4f4f4; background: #2a2a2a; "
+                     "border: 1.5px solid %1; border-radius: 8px; padding: 8px; "
+                     "selection-background-color: %1; }")
+          .arg(chromeTheme().accent.name()));
+  markerNoteEditor_->setFont(chromeFont(14));
+  markerNoteEditor_->installEventFilter(this);
+}
+
+void CaptureEditor::layoutMarkerNoteEditor() {
+  if (!markerNoteEditor_)
+    return;
+  const QRectF imageRect = editImageRect();
+  const QSize size(std::min(520, qMax(240, int(imageRect.width() * 0.55))),
+                   180);
+  QPoint center = imageRect.center().toPoint();
+  if (!imageRect.isEmpty()) {
+    center = (markerNotePending_
+                  ? annotationPointToWidgetForTest(markerNotePendingAnnotation_.start).toPoint()
+                  : (selectedAnnotation_ >= 0 && selectedAnnotation_ < annotations_.size()
+                         ? annotationPointToWidgetForTest(
+                               annotations_.at(selectedAnnotation_).start).toPoint()
+                         : imageRect.center().toPoint()));
+  }
+  QRect geo(center.x() - size.width() / 2, center.y() - size.height() / 2,
+            size.width(), size.height());
+  const QRect viewport = rect().adjusted(16, 16, -16, -16);
+  if (geo.left() < viewport.left())
+    geo.moveLeft(viewport.left());
+  if (geo.top() < viewport.top())
+    geo.moveTop(viewport.top());
+  if (geo.right() > viewport.right())
+    geo.moveRight(viewport.right());
+  if (geo.bottom() > viewport.bottom())
+    geo.moveBottom(viewport.bottom());
+  markerNoteEditor_->setGeometry(geo);
+}
+
+void CaptureEditor::beginMarkerNote(const QPointF &placementPoint) {
+  ensureMarkerNoteEditor();
+  markerNotePending_ = true;
+  markerNoteEditingIndex_ = -1;
+  markerNotePendingAnnotation_.kind = Annotation::Kind::Marker;
+  markerNotePendingAnnotation_.start = placementPoint;
+  markerNotePendingAnnotation_.end = placementPoint;
+  markerNotePendingAnnotation_.number = nextMarker_;
+  markerNotePendingAnnotation_.color = annotationColor();
+  markerNotePendingAnnotation_.size = annotationSize_;
+  markerNotePendingAnnotation_.text.clear();
+  markerNoteEditor_->clear();
+  layoutMarkerNoteEditor();
+  markerNoteEditor_->show();
+  markerNoteEditor_->raise();
+  markerNoteEditor_->setFocus(Qt::PopupFocusReason);
+  setStatus(QStringLiteral("Enter newline · Ctrl+Enter saves · Esc cancels"));
+  update();
+}
+
+void CaptureEditor::editMarkerNote(int annotationIndex) {
+  if (annotationIndex < 0 || annotationIndex >= annotations_.size() ||
+      annotations_.at(annotationIndex).kind != Annotation::Kind::Marker)
+    return;
+  ensureMarkerNoteEditor();
+  markerNotePending_ = false;
+  markerNoteEditingIndex_ = annotationIndex;
+  markerNoteEditor_->setPlainText(annotations_.at(annotationIndex).text);
+  layoutMarkerNoteEditor();
+  markerNoteEditor_->show();
+  markerNoteEditor_->raise();
+  markerNoteEditor_->setFocus(Qt::PopupFocusReason);
+  setStatus(QStringLiteral("Enter newline · Ctrl+Enter saves · Esc cancels"));
+  update();
+}
+
+void CaptureEditor::acceptMarkerNote() {
+  if (!markerNoteEditor_ || !markerNoteEditor_->isVisible())
+    return;
+  const QString text = markerNoteEditor_->toPlainText();
+  if (markerNotePending_) {
+    markerNotePendingAnnotation_.text = text;
+    selectedAnnotation_ = -1;
+    selectedAnnotations_.clear();
+    setStatus(QStringLiteral("Marker %1 added · V for select mode")
+                  .arg(markerNotePendingAnnotation_.number));
+    commitAnnotate(std::move(markerNotePendingAnnotation_));
+    markerNotePending_ = false;
+  } else if (markerNoteEditingIndex_ >= 0 &&
+             markerNoteEditingIndex_ < annotations_.size()) {
+    Annotation updated = annotations_.at(markerNoteEditingIndex_);
+    updated.text = text;
+    annotations_[markerNoteEditingIndex_] = updated;
+    selectedAnnotation_ = markerNoteEditingIndex_;
+    selectedAnnotations_ = {markerNoteEditingIndex_};
+    setStatus(QStringLiteral("Marker %1 directions updated")
+                  .arg(updated.number));
+    commitPatch({markerNoteEditingIndex_});
+    markerNoteEditingIndex_ = -1;
+  }
+  markerNoteEditor_->clear();
+  markerNoteEditor_->hide();
+  setFocus(Qt::OtherFocusReason);
+  updatePointerCursor();
+  update();
+}
+
+void CaptureEditor::cancelMarkerNote() {
+  if (!markerNoteEditor_ || !markerNoteEditor_->isVisible())
+    return;
+  const bool wasPending = markerNotePending_;
+  markerNotePending_ = false;
+  markerNoteEditingIndex_ = -1;
+  markerNoteEditor_->clear();
+  markerNoteEditor_->hide();
+  setFocus(Qt::OtherFocusReason);
+  if (wasPending)
+    setStatus(QStringLiteral("Marker cancelled"));
+  else
+    setStatus(QStringLiteral("Edit cancelled"));
+  updatePointerCursor();
+  update();
+}
+
+bool CaptureEditor::markerNoteOpen() const {
+  return markerNoteEditor_ && markerNoteEditor_->isVisible();
+}
+
 void CaptureEditor::selectWindowInDirection(int key) {
   int current = hoveredWindow_;
   if (current < 0)
@@ -4172,9 +4383,15 @@ void CaptureEditor::finish(OutputMode mode) {
       if (!workingSource.isEmpty())
         QFile::remove(workingSource);
     };
-    const QImage image = renderCapture(captureCopy, selection, annotations,
-                                       background, imageShadow,
-                                       canvasBoundary, backdrop);
+    QImage image = renderCapture(captureCopy, selection, annotations,
+                                 background, imageShadow,
+                                 canvasBoundary, backdrop);
+    QString embedError;
+    if (!embedNotesInCaptureRender(image, captureCopy, selection, annotations,
+                                   background, canvasBoundary, embedError)) {
+      result.error = embedError;
+      return;
+    }
     const auto retainAfterOutput = qScopeGuard([&] {
       startupTimingMark("capture output ready");
       completion.addResult(result);
@@ -4277,6 +4494,14 @@ void CaptureEditor::completeFinish(const FinishResult &result) {
 }
 
 void CaptureEditor::handleToolbar(const QString &action) {
+  if (markerNoteOpen()) {
+    if (action == QStringLiteral("marker-notes")) {
+      toggleMarkerNotesMode();
+      cancelMarkerNote();
+      return;
+    }
+    cancelMarkerNote();
+  }
   const Tool toolBefore = tool_;
   const QString statusBefore = status_;
   if (action == QStringLiteral("tool-select"))
@@ -4295,6 +4520,10 @@ void CaptureEditor::handleToolbar(const QString &action) {
     activateHighlighter();
   else if (action == QStringLiteral("tool-marker"))
     tool_ = Tool::Marker;
+  else if (action == QStringLiteral("marker-notes")) {
+    toggleMarkerNotesMode();
+    return;
+  }
   else if (action == QStringLiteral("tool-rectangle") ||
            action == QStringLiteral("tool-ellipse") ||
            action == QStringLiteral("shape-rectangle") ||
@@ -4420,6 +4649,16 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
   }
   if (phase_ == Phase::Export || busy_) {
     event->accept();
+    return;
+  }
+  if (markerNoteOpen()) {
+    if (event->key() == Qt::Key_Escape) {
+      cancelMarkerNote();
+      event->accept();
+      return;
+    }
+    // Let the event filter handle Ctrl+Enter and plain Enter in the note editor.
+    QWidget::keyPressEvent(event);
     return;
   }
   const Tool toolBefore = tool_;
@@ -4611,16 +4850,24 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     finish(OutputMode::Save);
     return;
   } else if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-    // Enter on a selected label reopens it for editing; anywhere else it
-    // finishes the capture.
+    // Enter on a selected label or marker reopens it for editing; anywhere
+    // else it finishes the capture.
     if (selectedAnnotation_ >= 0 && selectedAnnotation_ < annotations_.size() &&
-        selectedAnnotations_.size() <= 1 &&
-        annotations_.at(selectedAnnotation_).kind == Annotation::Kind::Text &&
-        !dragging_ && !textEditing()) {
-      tool_ = Tool::Select;
-      beginText({}, selectedAnnotation_);
-      update();
-      return;
+        selectedAnnotations_.size() <= 1 && !dragging_ && !textEditing()) {
+      if (annotations_.at(selectedAnnotation_).kind == Annotation::Kind::Text) {
+        tool_ = Tool::Select;
+        beginText({}, selectedAnnotation_);
+        update();
+        return;
+      }
+      if (annotations_.at(selectedAnnotation_).kind ==
+              Annotation::Kind::Marker &&
+          markerNotesMode_) {
+        tool_ = Tool::Select;
+        editMarkerNote(selectedAnnotation_);
+        update();
+        return;
+      }
     }
     finish(OutputMode::Both);
     return;
@@ -4683,6 +4930,9 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     activateHighlighter();
   } else if (event->key() == Qt::Key_C || event->key() == Qt::Key_M) {
     tool_ = Tool::Marker;
+  } else if (event->key() == Qt::Key_N && !event->modifiers()) {
+    toggleMarkerNotesMode();
+    return;
   } else if (event->key() == Qt::Key_R || event->key() == Qt::Key_E) {
     const bool rectangle = event->key() == Qt::Key_R;
     const Tool shape = rectangle ? Tool::Rectangle : Tool::Ellipse;
@@ -4855,6 +5105,8 @@ CaptureEditor::liveLayers(const QPointF &pointer) const {
   live.annotations.reserve(annotations_.size() + 1);
   for (int index = 0; index < annotations_.size(); ++index) {
     if (index == editingAnnotation_)
+      continue;
+    if (annotations_.at(index).flattened)
       continue;
     if (annotationLayer(annotations_.at(index).kind) ==
         AnnotationLayer::Default)
@@ -5289,6 +5541,8 @@ void CaptureEditor::queuePointerRepaint(const QRegion &damage) {
 }
 
 void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
+  if (markerNoteOpen())
+    return;
   if (panning_) {
     panView(event->position() - panAnchor_);
     panAnchor_ = event->position();
@@ -5649,17 +5903,24 @@ void CaptureEditor::mouseDoubleClickEvent(QMouseEvent *event) {
       !visibleEditImageRect().contains(event->position()))
     return;
   const int index = annotationAt(toAnnotationPoint(event->position()));
-  if (index < 0 || annotations_.at(index).kind != Annotation::Kind::Text)
+  if (index < 0)
     return;
   selectedAnnotation_ = index;
   tool_ = Tool::Select;
-  beginText({}, index);
+  if (annotations_.at(index).kind == Annotation::Kind::Text) {
+    beginText({}, index);
+  } else if (annotations_.at(index).kind == Annotation::Kind::Marker &&
+             markerNotesMode_) {
+    editMarkerNote(index);
+  } else {
+    return;
+  }
   event->accept();
   update();
 }
 
 void CaptureEditor::mousePressEvent(QMouseEvent *event) {
-  if (phase_ == Phase::Export || busy_ || capturePending_)
+  if (phase_ == Phase::Export || busy_ || capturePending_ || markerNoteOpen())
     return;
   if (!ocrResultText_.isEmpty())
     dismissOcrOverlay();
@@ -5994,17 +6255,22 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
     }
   }
   if (tool_ == Tool::Marker) {
-    Annotation annotation;
-    annotation.kind = Annotation::Kind::Marker;
-    annotation.start = markerPlacementPoint(cursor_);
-    annotation.number = nextMarker_;
-    annotation.color = annotationColor();
-    annotation.size = annotationSize_;
-    selectedAnnotation_ = -1;
-    setStatus(QStringLiteral("Marker %1 added · V for select mode")
-                  .arg(annotation.number));
-    commitAnnotate(std::move(annotation));
-    updatePointerCursor();
+    const QPointF placement = markerPlacementPoint(cursor_);
+    if (markerNotesMode_) {
+      beginMarkerNote(placement);
+    } else {
+      Annotation annotation;
+      annotation.kind = Annotation::Kind::Marker;
+      annotation.start = placement;
+      annotation.number = nextMarker_;
+      annotation.color = annotationColor();
+      annotation.size = annotationSize_;
+      selectedAnnotation_ = -1;
+      setStatus(QStringLiteral("Marker %1 added \u00b7 V for select mode")
+                    .arg(annotation.number));
+      commitAnnotate(std::move(annotation));
+      updatePointerCursor();
+    }
   } else if (tool_ == Tool::Text) {
     // A click places a one-line label; a drag draws a box whose height says
     // how many lines Enter may fill before it commits (see mouseReleaseEvent).
@@ -6345,7 +6611,7 @@ void CaptureEditor::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void CaptureEditor::wheelEvent(QWheelEvent *event) {
-  if (busy_) {
+  if (busy_ || markerNoteOpen()) {
     event->accept();
     return;
   }
@@ -6841,10 +7107,23 @@ void CaptureEditor::adoptImage(QImage image, OperationLog log, CaptureMode kind,
   editedMode_ = kind;
   selectedAnnotation_ = -1;
   selectedAnnotations_.clear();
-  if (ops_.isEmpty())
+  if (ops_.isEmpty()) {
     selection_ = QRectF(QPointF(), capture_.previewSize);
-  else
+    QString importError;
+    const QVector<Annotation> imported =
+        importNotesFromImage(capture_.source, capture_, importError);
+    for (Annotation annotation : imported) {
+      annotation.id = nextAnnotationId_++;
+      nextMarker_ = std::max(nextMarker_, annotation.number + 1);
+      Operation op;
+      op.type = Operation::Type::Annotate;
+      op.annotations = {std::move(annotation)};
+      ops_.push_back(std::move(op));
+    }
+    opIndex_ = ops_.size();
+  } else {
     replayLog();
+  }
   // A fresh working document: the old snapshot belonged to the screen.
   snapshotPath_.clear();
   sourceWritten_ = false;

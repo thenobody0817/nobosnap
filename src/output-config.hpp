@@ -44,5 +44,11 @@ struct OutputConfig {
  *  solid backdrop instead of the overlay's see-through dim. */
 [[nodiscard]] bool loadEditorWindowBackdropOpaque(const QString &filePath);
 
+/** True when [editor] marker-notes = true: placing a numbered marker opens
+ *  a directions dialog and exports carry an invisible omasnap-notes/1 payload. */
+[[nodiscard]] bool loadMarkerNotesMode(const QString &filePath);
+/** Persist the marker-notes toggle to [editor] marker-notes. */
+void saveMarkerNotesMode(const QString &filePath, bool enabled);
+
 /** ~/.config/omasnap/omasnap.conf (XDG config location). */
 [[nodiscard]] QString defaultConfigPath();

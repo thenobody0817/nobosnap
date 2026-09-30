@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(omasnap VERSION 1.21.0 LANGUAGES C CXX)
+project(omasnap VERSION 1.22.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CTest)
 set(CMAKE_AUTOMOC ON)
@@ -53,6 +53,8 @@ add_library(omasnap-core STATIC
   src/capture.hpp
   src/cut.cpp
   src/cut.hpp
+  src/notes/notes_codec.cpp
+  src/notes/notes_codec.hpp
   src/palette-config.cpp
   src/palette-config.hpp
   src/background-config.cpp
@@ -150,6 +152,11 @@ target_compile_definitions(omasnap PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
 target_link_libraries(omasnap PRIVATE omasnap-core)
 target_precompile_headers(omasnap REUSE_FROM omasnap-core)
 
+qt_add_executable(omasnap-notes src/notes/omasnap-notes.cpp)
+target_compile_options(omasnap-notes PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(omasnap-notes PRIVATE omasnap-core)
+target_precompile_headers(omasnap-notes REUSE_FROM omasnap-core)
+
 if(BUILD_TESTING)
 qt_add_executable(omasnap-smoke
   tests/scroll-focus-smoke.cpp
@@ -203,6 +210,8 @@ qt_add_executable(omasnap-smoke
   tests/scroll-startup-smoke.hpp
   tests/save-as-smoke.cpp
   tests/save-as-smoke.hpp
+  tests/notes-smoke.cpp
+  tests/notes-smoke.hpp
 )
 target_include_directories(omasnap-smoke PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/tests"
@@ -226,7 +235,7 @@ target_compile_features(stitch-replay PRIVATE cxx_std_23)
 target_compile_options(stitch-replay PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(stitch-replay PRIVATE Qt6::Core Qt6::Gui)
 
-install(TARGETS omasnap
+install(TARGETS omasnap omasnap-notes
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 install(FILES assets/OFL.txt

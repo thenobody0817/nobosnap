@@ -573,6 +573,15 @@ private:
   /// last one; Shift+Enter always adds a line's room.
   void beginText(const QPointF &point, int annotationIndex = -1,
                  int lineCapacity = 1);
+  /// Opens or closes the marker-directions dialog.
+  void beginMarkerNote(const QPointF &placementPoint);
+  void editMarkerNote(int annotationIndex);
+  void acceptMarkerNote();
+  void cancelMarkerNote();
+  [[nodiscard]] bool markerNoteOpen() const;
+  void ensureMarkerNoteEditor();
+  void layoutMarkerNoteEditor();
+  void toggleMarkerNotesMode();
   void chooseWindow(int index);
   void setScrollMode(bool enabled);
   void selectFullscreen();
@@ -962,6 +971,11 @@ private:
   /// Wrap width of the text being typed, in image px; 0 wraps at the canvas
   /// edge. Carried onto the layer when the text is committed.
   qreal textEditWrapWidth_ = 0.0;
+  bool markerNotesMode_ = false;
+  bool markerNotePending_ = false;
+  Annotation markerNotePendingAnnotation_;
+  int markerNoteEditingIndex_ = -1;
+  QPlainTextEdit *markerNoteEditor_ = nullptr;
   bool textCaretOn_ = true;
   QTimer textCaretTimer_;
   QElapsedTimer nudgeTimer_;

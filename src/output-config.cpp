@@ -96,6 +96,17 @@ bool loadEditorWindowBackdropOpaque(const QString &filePath) {
              .toLower() != QStringLiteral("translucent");
 }
 
+bool loadMarkerNotesMode(const QString &filePath) {
+  QSettings settings(filePath, QSettings::IniFormat);
+  return settings.value(QStringLiteral("editor/marker-notes"), false).toBool();
+}
+
+void saveMarkerNotesMode(const QString &filePath, bool enabled) {
+  QSettings settings(filePath, QSettings::IniFormat);
+  settings.setValue(QStringLiteral("editor/marker-notes"), enabled);
+  settings.sync();
+}
+
 QString defaultConfigPath() {
   return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
          QStringLiteral("/omasnap/omasnap.conf");

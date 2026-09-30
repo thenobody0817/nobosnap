@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cut.hpp"
+#include "notes/notes_codec.hpp"
 #include "pin.hpp"
 
 #include <cstdint>
@@ -109,6 +110,10 @@ struct Annotation {
   QVector<QPointF> rawPoints{};
   /// Pen post-stroke smoothing level (0--6); unused by other layer kinds.
   int smoothingLevel = 0;
+  /** A marker imported from a flattened PNG's notes payload. It already exists
+   *  in the source pixels, so it carries its directions for re-export but is
+   *  never painted, selected, or allowed to grow the canvas. */
+  bool flattened = false;
 
   bool operator==(const Annotation &) const = default;
 };
@@ -397,8 +402,37 @@ QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions
 [[nodiscard]] QString suggestedScreenshotPath(const QString &appSlug = {});
 /** Atomically saves flattened PNG pixels, preserving an existing file on
  * failure. PNG encoding and disk I/O must run on a worker. */
+/**
+ * Build an omasnap-notes/1 payload from marker annotations.
+ * `imageSize` is the final rendered pixel size (e.g. renderCapture().size()).
+ * Markers whose normalized position falls outside [0,1] are skipped.
+ */
+[[nodiscard]] NotesPayload notesPayloadForCapture(
+    const CaptureData &capture, const QRectF &selection,
+    const QVector<Annotation> &annotations, BackgroundStyle backgroundStyle,
+    CanvasBoundaryMode boundaryMode, const QSize &imageSize,
+    const QImage &customBackdrop = {});
+/**
+ * Embed a marker-notes payload into a rendered capture image.
+ * Returns false and sets `error` on capacity or codec failure; the image is
+ * left unchanged on failure.
+ */
+[[nodiscard]] bool embedNotesInCaptureRender(
+    QImage &image, const CaptureData &capture, const QRectF &selection,
+    const QVector<Annotation> &annotations, BackgroundStyle backgroundStyle,
+    CanvasBoundaryMode boundaryMode, QString &error,
+    const QImage &customBackdrop = {});
+/**
+ * Decode marker notes from a flattened PNG and convert them back to Marker
+ * annotations in capture logical coordinates. Used when no editable operation
+ * log is available. Positions are best-effort for images with framed backdrops
+ * or grown canvases.
+ */
+[[nodiscard]] QVector<Annotation> importNotesFromImage(
+    const QImage &image, const CaptureData &capture, QString &error);
+
 [[nodiscard]] bool savePngFile(const QImage &image, const QString &path,
-                              QString &error);
+                               QString &error);
 /**
  * Moves a finished export into the screenshots directory as
  * `screenshot-<yyyy-MM-dd_HH-mm-ss>[-<appSlug>].png`. The date leads so the

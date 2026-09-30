@@ -24,6 +24,8 @@
 #include "stitch-smoke.hpp"
 #include "scroll-startup-smoke.hpp"
 #include "save-as-smoke.hpp"
+#include "notes-smoke.hpp"
+#include "notes/notes_codec.hpp"
 #include "stitch.hpp"
 #include "stroke-smoothing-smoke.hpp"
 #include "pin-lifecycle-smoke.hpp"
@@ -5190,6 +5192,212 @@ std::optional<QPointF> changedCenter(const QImage &before, const QImage &after,
   return QRectF(changed).center();
 }
 
+/**
+ * Number + directions: the toggle persists, placing a marker opens a focused
+ * note dialog, Ctrl+Enter commits one undoable marker, and Esc cancels the
+ * pending marker without adding a layer or consuming its number.
+ */
+bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
+  CaptureData capture;
+  capture.monitor.name = QStringLiteral("TEST");
+  capture.monitor.geometry = {0, 0, 800, 600};
+  capture.monitor.pixelSize = {800, 600};
+  capture.monitor.scale = 1.0;
+  capture.source = QImage(800, 600, QImage::Format_ARGB32_Premultiplied);
+  capture.source.fill(QColor(QStringLiteral("#182030")));
+  capture.previewSize = capture.source.size();
+
+  CaptureEditor editor(capture);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+  QTest::mouseMove(&editor, QPoint(700, 500), 20);
+  QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(700, 500));
+  application.processEvents();
+
+  QTest::keyClick(&editor, Qt::Key_N);
+  application.processEvents();
+  if (!editor.statusForTest().contains(QStringLiteral("enabled")) ||
+      !loadMarkerNotesMode(defaultConfigPath())) {
+    error = QStringLiteral("N did not enable and persist number + directions");
+    return false;
+  }
+
+  const QPointF origin = editor.editImageRectForTest().topLeft();
+  const qreal scale = editor.editScaleForTest();
+  const auto toScreen = [&](const QPointF &point) {
+    return (origin + point * scale).toPoint();
+  };
+
+  QTest::keyClick(&editor, Qt::Key_C);
+  QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({200, 200}));
+  application.processEvents();
+  auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
+  if (!note || !editor.statusForTest().contains(QStringLiteral("Ctrl+Enter"))) {
+    error = QStringLiteral("A marker placed in notes mode did not open its "
+                           "directions dialog");
+    return false;
+  }
+  QTest::keyClicks(note, QStringLiteral("Move this here"));
+  QTest::keyClick(note, Qt::Key_Return, Qt::ControlModifier);
+  application.processEvents();
+  if (editor.annotationCountForTest() != 1 ||
+      editor.currentAnnotationsForTest().constFirst().text !=
+          QStringLiteral("Move this here")) {
+    error = QStringLiteral("Ctrl+Enter did not commit the marker directions");
+    return false;
+  }
+
+  // Esc cancels the pending marker, and the cancelled number is reused.
+  QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({360, 300}));
+  application.processEvents();
+  note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
+  if (!note) {
+    error = QStringLiteral("The second marker did not open its dialog");
+    return false;
+  }
+  QTest::keyClick(note, Qt::Key_Escape);
+  application.processEvents();
+  if (editor.annotationCountForTest() != 1) {
+    error = QStringLiteral("Esc added the cancelled marker anyway");
+    return false;
+  }
+  QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({360, 300}));
+  application.processEvents();
+  note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
+  if (!note) {
+    error = QStringLiteral("The replacement marker did not open its dialog");
+    return false;
+  }
+  QTest::keyClicks(note, QStringLiteral("Second"));
+  QTest::keyClick(note, Qt::Key_Return, Qt::ControlModifier);
+  application.processEvents();
+  if (editor.annotationCountForTest() != 2 ||
+      editor.currentAnnotationsForTest().constLast().number != 2) {
+    error = QStringLiteral("Cancelling a marker consumed its number");
+    return false;
+  }
+
+  // Leave the shared smoke config the way it was found.
+  QTest::keyClick(&editor, Qt::Key_N);
+  application.processEvents();
+  if (loadMarkerNotesMode(defaultConfigPath())) {
+    error = QStringLiteral("N did not disable number + directions");
+    return false;
+  }
+  editor.close();
+  return true;
+}
+
+/**
+ * The export path itself: a rendered capture embeds its marker directions,
+ * the PNG actually written round-trips them, reopening recovers flattened
+ * markers, and clearing the markers neutralises a stale payload.
+ */
+bool runNotesCaptureIntegrationCheck(QString &error) {
+  CaptureData capture;
+  capture.monitor.name = QStringLiteral("TEST");
+  capture.monitor.geometry = {0, 0, 800, 600};
+  capture.monitor.pixelSize = {800, 600};
+  capture.monitor.scale = 1.0;
+  capture.source = QImage(800, 600, QImage::Format_ARGB32_Premultiplied);
+  capture.source.fill(QColor(QStringLiteral("#182030")));
+  capture.previewSize = capture.source.size();
+
+  Annotation marker;
+  marker.kind = Annotation::Kind::Marker;
+  marker.number = 3;
+  marker.text = QStringLiteral("Send this to the agent\nand the second line");
+  marker.start = {400, 300};
+  marker.end = {400, 300};
+  marker.color = Qt::white;
+  marker.size = 4.0;
+  const QRectF selection(0, 0, 800, 600);
+
+  QImage image =
+      renderCapture(capture, selection, {marker}, BackgroundStyle::None);
+  QString embedError;
+  if (!embedNotesInCaptureRender(image, capture, selection, {marker},
+                                 BackgroundStyle::None, CanvasBoundaryMode::Image,
+                                 embedError)) {
+    error = QStringLiteral("embedNotesInCaptureRender failed: %1")
+                .arg(embedError);
+    return false;
+  }
+
+  NotesPayload payload;
+  QString decodeError;
+  if (extractNotesFromImage(image, payload, decodeError) !=
+      NotesCodecError::None) {
+    error =
+        QStringLiteral("an exported render did not decode: %1").arg(decodeError);
+    return false;
+  }
+  if (payload.notes.size() != 1 ||
+      payload.notes.constFirst().instruction != marker.text ||
+      std::abs(payload.notes.constFirst().position.x() - 0.5) > 0.01 ||
+      std::abs(payload.notes.constFirst().position.y() - 0.5) > 0.01) {
+    error =
+        QStringLiteral("the exported payload lost the marker's text or position");
+    return false;
+  }
+
+  // The PNG written by Save/Copy is what the decoder actually reads.
+  QByteArray png;
+  QBuffer buffer(&png);
+  if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) {
+    buffer.close();
+    error = QStringLiteral("the annotated render did not encode to PNG");
+    return false;
+  }
+  buffer.close();
+  QImage reloaded;
+  if (!reloaded.loadFromData(png, "PNG")) {
+    error = QStringLiteral("the saved annotated PNG did not reload");
+    return false;
+  }
+  NotesPayload roundTripped;
+  if (extractNotesFromImage(reloaded, roundTripped, decodeError) !=
+          NotesCodecError::None ||
+      roundTripped.notes.size() != 1 ||
+      roundTripped.notes.constFirst().instruction != marker.text) {
+    error = QStringLiteral("the saved PNG lost its directions: %1")
+                .arg(decodeError);
+    return false;
+  }
+
+  // Reopening the flattened PNG recovers the marker without redrawing it.
+  const QVector<Annotation> imported =
+      importNotesFromImage(reloaded, capture, decodeError);
+  if (imported.size() != 1 ||
+      imported.constFirst().kind != Annotation::Kind::Marker ||
+      imported.constFirst().text != marker.text ||
+      !imported.constFirst().flattened) {
+    error = QStringLiteral("reopening did not recover the flattened marker");
+    return false;
+  }
+
+  // Clearing the markers neutralises the stale payload on the next export.
+  QImage cleared = image;
+  QString clearError;
+  if (!embedNotesInCaptureRender(cleared, capture, selection, {},
+                                 BackgroundStyle::None, CanvasBoundaryMode::Image,
+                                 clearError)) {
+    error = QStringLiteral("neutralising a cleared capture failed: %1")
+                .arg(clearError);
+    return false;
+  }
+  NotesPayload stale;
+  if (extractNotesFromImage(cleared, stale, decodeError) !=
+          NotesCodecError::None ||
+      !stale.notes.isEmpty()) {
+    error = QStringLiteral("a cleared capture kept its stale directions");
+    return false;
+  }
+  return true;
+}
+
 /** The counter preview and committed counter share a nine-pixel up-left
  *  pointer lead at every zoom. */
 bool runMarkerPointerOffsetSmoke(QApplication &application, QString &error) {
@@ -8293,9 +8501,11 @@ bool runWindowedZoomFramingCheck(QApplication &application, QString &error) {
                 .arg(belowShadow.name());
     return false;
   }
-  // Clipped viewport boundaries are not source crop edges.
+  // Clipped viewport boundaries are not source crop edges. The press lands
+  // just inside the viewport: the row above `bandTop` is the toolbar, where a
+  // stray click would toggle whichever button sits under the pointer.
   const QImage beforeCrop = editor.renderCurrentOutput();
-  const QPoint syntheticHandle(500, bandTop - 7);
+  const QPoint syntheticHandle(500, bandTop + 1);
   QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, syntheticHandle);
   QTest::mouseMove(&editor, syntheticHandle + QPoint(0, 20), 10);
   QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
@@ -12204,6 +12414,14 @@ int main(int argc, char **argv) {
 
   QApplication application(argc, argv);
   QApplication::setFont(chromeDefaultFont()); // as main() does
+
+  // Isolate config so the developer's own omasnap.conf (output paths, marker
+  // notes mode, palette) can never steer the suite.
+  QTemporaryDir smokeConfig;
+  if (!smokeConfig.isValid())
+    return 18;
+  qputenv("XDG_CONFIG_HOME", smokeConfig.path().toUtf8());
+
   if (!loadCaptureFonts())
     return 17;
 
@@ -12264,6 +12482,18 @@ int main(int argc, char **argv) {
       return 1;
     }
     return 0;
+  }
+  if (!runNotesSmokeTests(snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 240;
+  }
+  if (!runNotesCaptureIntegrationCheck(snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 241;
+  }
+  if (!runMarkerNotesModeSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 242;
   }
   if (!runShortcutGuideSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;

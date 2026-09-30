@@ -2,6 +2,7 @@
 #include <QTextLayout>
 #include <QTextOption>
 #include "capture.hpp"
+#include "notes/notes_codec.hpp"
 #include "pin-file.hpp"
 #include "pin-layout.hpp"
 #include "png.hpp"
@@ -226,6 +227,8 @@ QRectF captureCanvasRect(const QSizeF &sourceFrameSize,
   QRectF canvas = sourceFrame;
 
   for (const Annotation &annotation : annotations) {
+    if (annotation.flattened)
+      continue;
     const QRectF bounds = annotationPaintedBounds(annotation);
     if (!bounds.isNull())
       canvas = canvas.united(bounds);
@@ -1179,6 +1182,8 @@ void paintDefaultLayer(QPainter &painter, const QImage &redacted,
   // the order things were drawn or last picked up in.
   const auto passOver = [&](bool (*belongs)(Annotation::Kind)) {
     for (const Annotation &annotation : annotations) {
+      if (annotation.flattened)
+        continue;
       if (belongs(annotation.kind))
         paintAnnotation(painter, annotation, arrowDisplayScale);
     }
@@ -1544,6 +1549,192 @@ QImage renderCapture(const CaptureData &capture, const QRectF &selection,
   painter.end();
   setPngLogicalSize(output, renderedCaptureLogicalSize(capture, output.size()));
   return output;
+}
+
+namespace {
+struct NotesRenderGeometry {
+  qreal scaleX = 1.0;
+  qreal scaleY = 1.0;
+  QPointF sourceOriginOffset;
+  qreal offsetX = 0.0;
+  qreal offsetY = 0.0;
+
+  [[nodiscard]] QPointF map(const QPointF &annotationPoint) const {
+    return QPointF(annotationPoint.x() * scaleX - sourceOriginOffset.x() +
+                       offsetX,
+                   annotationPoint.y() * scaleY - sourceOriginOffset.y() +
+                       offsetY);
+  }
+};
+
+NotesRenderGeometry captureNotesGeometry(const CaptureData &capture,
+                                         const QRectF &selection,
+                                         const QVector<Annotation> &annotations,
+                                         BackgroundStyle backgroundStyle,
+                                         CanvasBoundaryMode boundaryMode,
+                                         const QSize &imageSize) {
+  NotesRenderGeometry geometry;
+  const QRect pixels = pixelSelection(capture, selection);
+  if (pixels.isEmpty() || imageSize.isEmpty())
+    return geometry;
+  const qreal sourceScaleX =
+      capture.source.width() / static_cast<qreal>(capture.previewSize.width());
+  const qreal sourceScaleY =
+      capture.source.height() / static_cast<qreal>(capture.previewSize.height());
+  const QSizeF outputScale = captureOutputScale(capture);
+  geometry.sourceOriginOffset = QPointF(
+      selection.left() * sourceScaleX - pixels.left(),
+      selection.top() * sourceScaleY - pixels.top());
+  geometry.scaleX = sourceScaleX;
+  geometry.scaleY = sourceScaleY;
+
+  const bool highDpi =
+      capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  bool resized = false;
+  if (highDpi) {
+    const QSize impliedSize(
+        std::max(1, qRound(selection.width() * outputScale.width())),
+        std::max(1, qRound(selection.height() * outputScale.height())));
+    if (pixels.size() != impliedSize)
+      resized = true;
+  }
+  if (resized) {
+    geometry.scaleX = outputScale.width();
+    geometry.scaleY = outputScale.height();
+    geometry.sourceOriginOffset = QPointF();
+  }
+
+  const QRectF sourceFrame(QPointF(), selection.size());
+  const QRectF canvas =
+      captureCanvasRect(selection.size(), annotations, boundaryMode);
+  const bool canvasGrown =
+      canvas.left() < sourceFrame.left() - 0.001 ||
+      canvas.top() < sourceFrame.top() - 0.001 ||
+      canvas.right() > sourceFrame.right() + 0.001 ||
+      canvas.bottom() > sourceFrame.bottom() + 0.001;
+  const bool automaticFramedBackground =
+      boundaryMode == CanvasBoundaryMode::Framed && canvasGrown &&
+      backgroundStyle == BackgroundStyle::None;
+  const BackgroundStyle effectiveBackground =
+      automaticFramedBackground ? BackgroundStyle::Slate : backgroundStyle;
+  const bool hasBackground =
+      effectiveBackground != BackgroundStyle::None &&
+      effectiveBackground != BackgroundStyle::Off;
+
+  if (canvasGrown) {
+    geometry.offsetX = std::max(
+        0, static_cast<int>(std::ceil(-canvas.left() * geometry.scaleX)));
+    geometry.offsetY = std::max(
+        0, static_cast<int>(std::ceil(-canvas.top() * geometry.scaleY)));
+  } else if (hasBackground && boundaryMode == CanvasBoundaryMode::Framed) {
+    geometry.offsetX = static_cast<int>(
+        std::round(kBackdropMargin * geometry.scaleX));
+    geometry.offsetY = static_cast<int>(
+        std::round(kBackdropMargin * geometry.scaleY));
+  }
+  return geometry;
+}
+} // namespace
+
+NotesPayload notesPayloadForCapture(const CaptureData &capture,
+                                    const QRectF &selection,
+                                    const QVector<Annotation> &annotations,
+                                    BackgroundStyle backgroundStyle,
+                                    CanvasBoundaryMode boundaryMode,
+                                    const QSize &imageSize,
+                                    const QImage &customBackdrop) {
+  NotesPayload payload;
+  payload.imageSize = imageSize;
+  if (imageSize.isEmpty())
+    return payload;
+  (void)customBackdrop; // background image path is resolved before rendering
+  const NotesRenderGeometry geometry = captureNotesGeometry(
+      capture, selection, annotations, backgroundStyle, boundaryMode, imageSize);
+  for (const Annotation &annotation : annotations) {
+    if (annotation.kind != Annotation::Kind::Marker ||
+        annotation.text.isEmpty())
+      continue;
+    const QPointF pixel = geometry.map(annotation.start);
+    const QPointF normalized(pixel.x() / imageSize.width(),
+                             pixel.y() / imageSize.height());
+    if (normalized.x() < 0.0 || normalized.x() > 1.0 ||
+        normalized.y() < 0.0 || normalized.y() > 1.0)
+      continue;
+    NoteTarget target;
+    target.id = QString::number(annotation.id);
+    target.number = annotation.number;
+    target.position = normalized;
+    target.instruction = annotation.text;
+    payload.notes.append(std::move(target));
+  }
+  return payload;
+}
+
+bool embedNotesInCaptureRender(QImage &image, const CaptureData &capture,
+                               const QRectF &selection,
+                               const QVector<Annotation> &annotations,
+                               BackgroundStyle backgroundStyle,
+                               CanvasBoundaryMode boundaryMode, QString &error,
+                               const QImage &customBackdrop) {
+  if (image.isNull()) {
+    error = QStringLiteral("Cannot embed notes in a null rendered image");
+    return false;
+  }
+  const NotesPayload payload =
+      notesPayloadForCapture(capture, selection, annotations, backgroundStyle,
+                             boundaryMode, image.size(), customBackdrop);
+  if (payload.notes.isEmpty()) {
+    // No live notes. A reopened PNG may still carry an older payload in its
+    // source pixels, so neutralize it rather than leave stale directions that
+    // no longer match the image. A clean image is left untouched.
+    NotesPayload existing;
+    QString ignored;
+    const NotesCodecError present = extractNotesFromImage(image, existing, ignored);
+    if (present == NotesCodecError::NoPayload ||
+        present == NotesCodecError::UnsupportedVersion)
+      return true; // nothing readable to replace; leave a future payload alone
+    return embedNotesInImage(image, payload, error);
+  }
+  return embedNotesInImage(image, payload, error);
+}
+
+QVector<Annotation> importNotesFromImage(const QImage &image,
+                                         const CaptureData &capture,
+                                         QString &error) {
+  QVector<Annotation> imported;
+  NotesPayload payload;
+  const NotesCodecError result = extractNotesFromImage(image, payload, error);
+  if (result != NotesCodecError::None)
+    return imported;
+  if (payload.imageSize != image.size()) {
+    error = QStringLiteral("omasnap-notes payload image size does not match");
+    return imported;
+  }
+  const qreal scaleX =
+      capture.source.width() / static_cast<qreal>(capture.previewSize.width());
+  const qreal scaleY =
+      capture.source.height() / static_cast<qreal>(capture.previewSize.height());
+  if (scaleX <= 0.0 || scaleY <= 0.0) {
+    error = QStringLiteral("Cannot import notes: invalid capture scale");
+    return imported;
+  }
+  for (const NoteTarget &note : payload.notes) {
+    Annotation annotation;
+    annotation.kind = Annotation::Kind::Marker;
+    annotation.id = note.id.toULongLong();
+    annotation.number = note.number;
+    annotation.text = note.instruction;
+    annotation.start = QPointF(note.position.x() * image.width() / scaleX,
+                               note.position.y() * image.height() / scaleY);
+    annotation.end = annotation.start;
+    annotation.color = Qt::white;
+    annotation.size = 4.0;
+    // The marker is already baked into the source pixels; carry its directions
+    // for re-export without drawing a second counter over the first.
+    annotation.flattened = true;
+    imported.append(std::move(annotation));
+  }
+  return imported;
 }
 
 QSize renderedCaptureLogicalSize(const CaptureData &capture,
@@ -2296,6 +2487,8 @@ QJsonObject annotationToJson(const Annotation &annotation) {
                             ? QStringLiteral("rounded")
                             : QStringLiteral("ellipse"));
   }
+  if (annotation.flattened)
+    object.insert(QStringLiteral("flattened"), true);
   return object;
 }
 
@@ -2360,6 +2553,8 @@ bool annotationFromJson(const QJsonObject &object, Annotation &annotation,
           : spotlightShape == QStringLiteral("rounded")
                 ? SpotlightShape::RoundedRectangle
                 : SpotlightShape::Ellipse;
+  annotation.flattened =
+      object.value(QStringLiteral("flattened")).toBool(false);
   return true;
 }
 
