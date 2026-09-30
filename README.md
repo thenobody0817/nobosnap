@@ -564,7 +564,8 @@ Positions are normalized to the final exported image. The bits survive a
 lossless, pixel-identical PNG re-encode but not cropping, resizing, JPEG, or
 any other pixel change. This is hidden storage, not encryption — see
 [docs/notes-protocol.md](docs/notes-protocol.md) for the format, the bit
-layout, and the limits.
+layout, and the limits, and [docs/agent-integration.md](docs/agent-integration.md)
+for wiring the decoder into an AI agent.
 
 ### Capture previews and pins
 
