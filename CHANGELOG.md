@@ -5,7 +5,21 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 
 ## Unreleased
 
+## 1.22.0
+
 ### Added
+
+- **Number + directions**: an optional mode (`N`, persisted) where placing a
+  numbered marker opens a comment box. `Enter` adds a line, `Ctrl+Enter` saves
+  the marker and its text as one undoable step, and `Esc` cancels without
+  consuming the number. Double-click a marker (or select it and press `Enter`)
+  to edit its directions. Every export — Copy, Save, Save As, Copy + Save, and
+  pinned previews — embeds the directions invisibly in the PNG's RGB
+  least-significant bits, and reopening a flattened PNG recovers the markers so
+  the directions survive a re-export. The `omasnap-notes` tool decodes them
+  (`inspect`, `decode`, `--json`); see [docs/notes-protocol.md](docs/notes-protocol.md).
+  This is hidden storage, not encryption, and survives only lossless
+  pixel-identical PNG re-encoding.
 
 - `Tab` cycles region selection between free, square, 3:4, and 16:9 while
   capturing; `Shift+Tab` cycles back. The capture guide shows the active aspect.
@@ -210,7 +224,8 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 - Keep the toolbar, capture tabs, hotkey legend, and canvas geometry aligned.
 - Remove the pixels actually covered by a cut-band drag.
 
-[Unreleased changes](https://github.com/omacom/omasnap/compare/v1.21.0...main)
+[Unreleased changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.0...main)
+· [1.22.0 changes](https://github.com/thenobody0817/nobosnap/compare/v1.21.0...v1.22.0)
 · [1.21.0 changes](https://github.com/omacom/omasnap/compare/v1.20.1...v1.21.0)
 · [1.20.1 changes](https://github.com/omacom/omasnap/compare/v1.20.0...v1.20.1)
 · [1.20.0 changes](https://github.com/omacom/omasnap/compare/v1.19.1...v1.20.0)

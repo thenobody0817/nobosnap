@@ -1,5 +1,10 @@
 # Omasnap
 
+> **Nobosnap** is a fork of [Omasnap](https://github.com/omacom/omasnap) that adds
+> an optional **Number + directions** mode: number a marker, type directions, and
+> the exported PNG carries them invisibly in its pixels for a decoder to read.
+> See [docs/notes-protocol.md](docs/notes-protocol.md).
+
 See the [changelog](CHANGELOG.md) for release highlights and unreleased changes.
 
 A native Wayland screenshot and annotation overlay designed for Omarchy and Hyprland.
@@ -31,6 +36,9 @@ preview keeps it on screen.
 - Window capture is a crop of the focused-monitor frame. Overlapping windows stay
   visible; there is no second clean-window recapture.
 - Select/move/resize layers, mouse-wheel scaling, and eight external recropping handles.
+- Number + directions mode (`N`): placing a numbered marker opens a comment
+  box, and the export carries each marker's directions invisibly in the PNG's
+  pixel bits for `omasnap-notes` to decode.
 - Start arrows, shapes, strokes, markers, spotlights, or text in the unused
   fullscreen workspace around a screenshot, or resize and carry an existing
   layer past its edge, to grow the canvas. Source-based tools (redact, cut,
@@ -482,6 +490,7 @@ region after changing the display layout.
 | `H` | Highlighter; Snap mode uses a mouse-following I-beam at the nearby text height, then locks the drag straight to that row. Press `H` again (or click the active toolbar button) for Normal freehand mode, where wheel or `Alt`+wheel changes thickness; Snap keeps detected-row height automatic and wheel sets only its off-text fallback |
 | `I` | Eyedropper in the color popover · sample the image as the custom color |
 | `C` | Numbered marker |
+| `N` | Toggle Number + directions mode (persisted). With it on, placing a marker opens a comment box: `Enter` adds a line, `Ctrl+Enter` saves, `Esc` cancels without adding the marker |
 | `R` | Rectangle; hover the shape button for rectangle, ellipse, and fill controls; `Alt`+wheel rounds corners |
 | `E` | Ellipse; shares the shape submenu and filled/hollow toggle |
 | `D` | Redact; press again to toggle randomized pixelation or solid redaction |
@@ -502,6 +511,7 @@ region after changing the display layout.
 | Hold `Alt` while dragging | Center rectangles, ellipses, and spotlights on the press point; add `Shift` for a centered square/circle |
 | `←` `↑` `→` `↓` | Nudge the selected layer 1 px; hold `Shift` for 10 px (a held key is one undo step). With nothing selected, pan a zoomed capture |
 | Double-click text · `Enter` on a selected text | Reopen text editing |
+| Double-click a marker · `Enter` on a selected marker (Number + directions on) | Edit its directions |
 | `Delete` | Delete selected layer |
 | `Alt+D` | Duplicate selected layer (offset down-left, or away from a nearby edge); the copy becomes the selection |
 | `Ctrl+Z` | Undo |
@@ -520,6 +530,41 @@ replacing an originating preview or pin. The preview has the usual 10-second idl
 timeout; its folder and Copy path buttons refer to the exact PNG you saved.
 Cancel or a failed save keeps the editor open. Recent captures retain the editable
 layers and undo history.
+
+### Number + directions
+
+Press `N` (or click the toolbar's Number + directions button) to toggle a mode
+that turns numbered markers into annotations with a comment. Placing a marker
+opens a focused comment box over the image:
+
+- `Enter` inserts a newline, so directions can have several lines.
+- `Ctrl+Enter` saves the marker and its directions as one undoable step.
+- `Esc` cancels: the pending marker is dropped and its number is reused.
+
+With the mode on, double-click an existing marker (or select it and press
+`Enter`) to edit its directions. Moving, duplicating, deleting, undoing, and
+redoing markers all keep their directions attached.
+
+Every export (Copy, Save, Save As, Copy + Save, and pinned previews) embeds the
+directions invisibly in the PNG's pixel bits. Reopening such a PNG recovers the
+markers as flattened targets so the directions survive a re-export, without
+drawing a second counter over the one already in the pixels. Clearing the
+markers removes the payload on the next export; there is no visible comments
+panel or barcode.
+
+Decode them with the bundled tool:
+
+```bash
+omasnap-notes inspect screenshot.png   # summary: payload? how many notes?
+omasnap-notes decode  screenshot.png   # numbered directions with positions
+omasnap-notes decode  screenshot.png --json
+```
+
+Positions are normalized to the final exported image. The bits survive a
+lossless, pixel-identical PNG re-encode but not cropping, resizing, JPEG, or
+any other pixel change. This is hidden storage, not encryption — see
+[docs/notes-protocol.md](docs/notes-protocol.md) for the format, the bit
+layout, and the limits.
 
 ### Capture previews and pins
 
@@ -643,6 +688,11 @@ endpoint-only line selection, annotation-driven canvas growth and clipping polic
 external crop handles,
 and the native-pixel
 measurement readout on a scaled monitor.
+
+The suite also round-trips the `omasnap-notes/1` codec (Unicode, multiline,
+capacity, transparency, premultiplied and packed formats, corrupt headers,
+checksum failures, unsupported versions, and PNG recompression) and checks that
+a rendered capture embeds, saves, reopens, and neutralises marker directions.
 
 For live launch profiling, the binary has an opt-in millisecond trace from `main()`
 through the first completed overlay paint:
