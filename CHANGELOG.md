@@ -5,6 +5,16 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 
 ## Unreleased
 
+## 1.22.1
+
+### Fixed
+
+- Stop an intermittent crash right after startup (`--version`, `--help`, or any
+  fast exit): the live-theme worker began before the command line was parsed and
+  could still have been parsing when process exit tore down its static regular
+  expressions. The watcher now starts after the command line is parsed and is
+  waited on at shutdown.
+
 ## 1.22.0
 
 ### Added
@@ -224,7 +234,8 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 - Keep the toolbar, capture tabs, hotkey legend, and canvas geometry aligned.
 - Remove the pixels actually covered by a cut-band drag.
 
-[Unreleased changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.0...main)
+[Unreleased changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.1...main)
+· [1.22.1 changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.0...v1.22.1)
 · [1.22.0 changes](https://github.com/thenobody0817/nobosnap/compare/v1.21.0...v1.22.0)
 · [1.21.0 changes](https://github.com/omacom/omasnap/compare/v1.20.1...v1.21.0)
 · [1.20.1 changes](https://github.com/omacom/omasnap/compare/v1.20.0...v1.20.1)

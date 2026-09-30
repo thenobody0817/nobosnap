@@ -70,6 +70,7 @@ class ChromeThemeWatcher final : public QObject {
 public:
   explicit ChromeThemeWatcher(const QString &directory,
                               QObject *parent = nullptr);
+  ~ChromeThemeWatcher() override;
   [[nodiscard]] const ChromeTheme &theme() const { return theme_; }
 
 signals:

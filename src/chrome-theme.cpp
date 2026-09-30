@@ -393,6 +393,13 @@ ChromeThemeWatcher::ChromeThemeWatcher(const QString &directory,
   reload();
 }
 
+ChromeThemeWatcher::~ChromeThemeWatcher() {
+  // A reload runs on a worker thread and uses the process-static regular
+  // expressions in readValues(). Let it finish before those statics (and this
+  // object's watcher) are torn down, so shutdown cannot race a parse.
+  loader_.waitForFinished();
+}
+
 void ChromeThemeWatcher::reload() {
   if (loading_) {
     pending_ = true;
