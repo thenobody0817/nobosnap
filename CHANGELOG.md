@@ -5,6 +5,16 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 
 ## Unreleased
 
+## 1.23.0
+
+### Changed
+
+- The number tool is now the Number + directions tool: placing a numbered marker
+  opens its comment box directly, with no separate mode to toggle. `Enter` saves
+  the marker and arms the next number, `Shift+Enter` inserts a newline, and `Esc`
+  cancels without consuming the number. Removes the `N` toggle and the
+  `[editor] marker-notes` config key.
+
 ## 1.22.1
 
 ### Fixed
@@ -234,7 +244,8 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 - Keep the toolbar, capture tabs, hotkey legend, and canvas geometry aligned.
 - Remove the pixels actually covered by a cut-band drag.
 
-[Unreleased changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.1...main)
+[Unreleased changes](https://github.com/thenobody0817/nobosnap/compare/v1.23.0...main)
+· [1.23.0 changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.1...v1.23.0)
 · [1.22.1 changes](https://github.com/thenobody0817/nobosnap/compare/v1.22.0...v1.22.1)
 · [1.22.0 changes](https://github.com/thenobody0817/nobosnap/compare/v1.21.0...v1.22.0)
 · [1.21.0 changes](https://github.com/omacom/omasnap/compare/v1.20.1...v1.21.0)

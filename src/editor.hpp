@@ -581,7 +581,6 @@ private:
   [[nodiscard]] bool markerNoteOpen() const;
   void ensureMarkerNoteEditor();
   void layoutMarkerNoteEditor();
-  void toggleMarkerNotesMode();
   void chooseWindow(int index);
   void setScrollMode(bool enabled);
   void selectFullscreen();
@@ -971,7 +970,6 @@ private:
   /// Wrap width of the text being typed, in image px; 0 wraps at the canvas
   /// edge. Carried onto the layer when the text is committed.
   qreal textEditWrapWidth_ = 0.0;
-  bool markerNotesMode_ = false;
   bool markerNotePending_ = false;
   Annotation markerNotePendingAnnotation_;
   int markerNoteEditingIndex_ = -1;

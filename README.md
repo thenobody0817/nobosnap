@@ -1,9 +1,10 @@
 # Omasnap
 
 > **Nobosnap** is a fork of [Omasnap](https://github.com/omacom/omasnap) that adds
-> an optional **Number + directions** mode: number a marker, type directions, and
-> the exported PNG carries them invisibly in its pixels for a decoder to read.
-> See [docs/notes-protocol.md](docs/notes-protocol.md).
+> **Number + directions**: the number tool also records a comment per marker, and
+> the exported PNG carries those directions invisibly in its pixels for a decoder
+> to read. Placing a number opens a comment box; `Enter` saves it and starts the
+> next number. See [docs/notes-protocol.md](docs/notes-protocol.md).
 
 See the [changelog](CHANGELOG.md) for release highlights and unreleased changes.
 
@@ -36,9 +37,10 @@ preview keeps it on screen.
 - Window capture is a crop of the focused-monitor frame. Overlapping windows stay
   visible; there is no second clean-window recapture.
 - Select/move/resize layers, mouse-wheel scaling, and eight external recropping handles.
-- Number + directions mode (`N`): placing a numbered marker opens a comment
-  box, and the export carries each marker's directions invisibly in the PNG's
-  pixel bits for `omasnap-notes` to decode.
+- Number + directions: the numbered-marker tool also takes a comment. Placing a
+  marker opens a comment box (`Enter` saves and starts the next number,
+  `Shift+Enter` adds a line), and every export carries the directions invisibly
+  in the PNG's pixel bits for `omasnap-notes` to decode.
 - Start arrows, shapes, strokes, markers, spotlights, or text in the unused
   fullscreen workspace around a screenshot, or resize and carry an existing
   layer past its edge, to grow the canvas. Source-based tools (redact, cut,
@@ -489,8 +491,7 @@ region after changing the display layout.
 | `F` | Freehand pen; medium `3/6` smoothing by default, while `0/6` preserves the raw pointer path |
 | `H` | Highlighter; Snap mode uses a mouse-following I-beam at the nearby text height, then locks the drag straight to that row. Press `H` again (or click the active toolbar button) for Normal freehand mode, where wheel or `Alt`+wheel changes thickness; Snap keeps detected-row height automatic and wheel sets only its off-text fallback |
 | `I` | Eyedropper in the color popover · sample the image as the custom color |
-| `C` | Numbered marker |
-| `N` | Toggle Number + directions mode (persisted). With it on, placing a marker opens a comment box: `Enter` adds a line, `Ctrl+Enter` saves, `Esc` cancels without adding the marker |
+| `C` | Number + directions · placing a numbered marker opens a comment box: `Enter` saves and starts the next number, `Shift+Enter` adds a line, `Esc` cancels without adding the marker; the directions export invisibly for `omasnap-notes` |
 | `R` | Rectangle; hover the shape button for rectangle, ellipse, and fill controls; `Alt`+wheel rounds corners |
 | `E` | Ellipse; shares the shape submenu and filled/hollow toggle |
 | `D` | Redact; press again to toggle randomized pixelation or solid redaction |
@@ -511,7 +512,7 @@ region after changing the display layout.
 | Hold `Alt` while dragging | Center rectangles, ellipses, and spotlights on the press point; add `Shift` for a centered square/circle |
 | `←` `↑` `→` `↓` | Nudge the selected layer 1 px; hold `Shift` for 10 px (a held key is one undo step). With nothing selected, pan a zoomed capture |
 | Double-click text · `Enter` on a selected text | Reopen text editing |
-| Double-click a marker · `Enter` on a selected marker (Number + directions on) | Edit its directions |
+| Double-click a marker · `Enter` on a selected marker | Edit its directions |
 | `Delete` | Delete selected layer |
 | `Alt+D` | Duplicate selected layer (offset down-left, or away from a nearby edge); the copy becomes the selection |
 | `Ctrl+Z` | Undo |
@@ -533,17 +534,17 @@ layers and undo history.
 
 ### Number + directions
 
-Press `N` (or click the toolbar's Number + directions button) to toggle a mode
-that turns numbered markers into annotations with a comment. Placing a marker
-opens a focused comment box over the image:
+The number tool doubles as the directions tool. Press `C` and click where the
+marker goes: a focused comment box opens over the image.
 
-- `Enter` inserts a newline, so directions can have several lines.
-- `Ctrl+Enter` saves the marker and its directions as one undoable step.
+- `Enter` saves the marker and its directions as one undoable step, then arms
+  the next number for the next click.
+- `Shift+Enter` inserts a newline, so directions can have several lines.
 - `Esc` cancels: the pending marker is dropped and its number is reused.
 
-With the mode on, double-click an existing marker (or select it and press
-`Enter`) to edit its directions. Moving, duplicating, deleting, undoing, and
-redoing markers all keep their directions attached.
+Double-click an existing marker (or select it and press `Enter`) to edit its
+directions. Moving, duplicating, deleting, undoing, and redoing markers all
+keep their directions attached.
 
 Every export (Copy, Save, Save As, Copy + Save, and pinned previews) embeds the
 directions invisibly in the PNG's pixel bits. Reopening such a PNG recovers the

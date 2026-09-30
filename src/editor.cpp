@@ -811,7 +811,6 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
   startupTimingMark("palette config loaded");
   customColor_ = paletteConfig_.custom;
   backgroundConfig_ = loadBackgroundConfig(defaultConfigPath());
-  markerNotesMode_ = loadMarkerNotesMode(defaultConfigPath());
   connect(&backdropWatcher_, &QFutureWatcher<QImage>::finished, this,
           [this] { completeBackdropLoad(); });
   connect(&highlighterProbeWatcher_,
@@ -1192,11 +1191,12 @@ bool CaptureEditor::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::KeyPress) {
       auto *key = static_cast<QKeyEvent *>(event);
       if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
-        if (key->modifiers().testFlag(Qt::ControlModifier)) {
+        // Enter saves the marker and re-arms the next number; Shift+Enter adds
+        // a line so directions can be several lines long.
+        if (key->modifiers().testFlag(Qt::ShiftModifier))
+          markerNoteEditor_->insertPlainText(QStringLiteral("\n"));
+        else
           acceptMarkerNote();
-          return true;
-        }
-        markerNoteEditor_->insertPlainText(QStringLiteral("\n"));
         return true;
       }
       if (key->key() == Qt::Key_Escape) {
@@ -1561,15 +1561,11 @@ QString CaptureEditor::toolStatus() const {
         .arg(annotationTextFontName(textFont_))
         .arg(QString::fromLatin1(
             kTextSizeNames.at(static_cast<std::size_t>(textSizeIndex_))));
-  case Tool::Marker: {
-    const QString modeHint = markerNotesMode_
-                                 ? QStringLiteral("notes on \u00b7 ")
-                                 : QString();
-    return QStringLiteral("Marker \u00b7 %1next %2 \u00b7 size %3 \u00b7 wheel resizes")
-        .arg(modeHint)
+  case Tool::Marker:
+    return QStringLiteral("Number + directions \u00b7 next %1 \u00b7 size %2 "
+                          "\u00b7 click, type, Enter saves \u00b7 wheel resizes")
         .arg(nextMarker_)
         .arg(size);
-  }
   case Tool::Ocr:
     return QStringLiteral("Copy text · drag over the words to copy them");
   case Tool::Eyedropper:
@@ -2763,11 +2759,9 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
           .arg(stroke::maximumSmoothingLevel));
   add(36, QStringLiteral("tool-highlighter"), {}, highlighterTooltip());
   add(36, QStringLiteral("tool-marker"), {},
-      QStringLiteral("Number marker \u00b7 C \u00b7 Size %1 \u00b7 Wheel")
+      QStringLiteral("Number + directions \u00b7 C \u00b7 click, type, Enter "
+                     "saves \u00b7 Size %1 \u00b7 Wheel")
           .arg(qRound(annotationSize_)));
-  add(36, QStringLiteral("marker-notes"),
-      markerNotesMode_ ? QStringLiteral("on") : QString(),
-      QStringLiteral("Number + directions \u00b7 N"));
   const QString fillHint = fillShapes_ ? QStringLiteral("filled") : QString();
   const bool ellipseSelected = tool_ == Tool::Ellipse;
   add(36, ellipseSelected ? QStringLiteral("tool-ellipse")
@@ -4011,14 +4005,6 @@ void CaptureEditor::acceptText(bool keepSelected) {
   update();
 }
 
-void CaptureEditor::toggleMarkerNotesMode() {
-  markerNotesMode_ = !markerNotesMode_;
-  saveMarkerNotesMode(defaultConfigPath(), markerNotesMode_);
-  setStatus(markerNotesMode_
-                ? QStringLiteral("Number + directions mode enabled · N toggles")
-                : QStringLiteral("Number + directions mode disabled · N toggles"));
-}
-
 void CaptureEditor::ensureMarkerNoteEditor() {
   if (markerNoteEditor_)
     return;
@@ -4081,7 +4067,7 @@ void CaptureEditor::beginMarkerNote(const QPointF &placementPoint) {
   markerNoteEditor_->show();
   markerNoteEditor_->raise();
   markerNoteEditor_->setFocus(Qt::PopupFocusReason);
-  setStatus(QStringLiteral("Enter newline · Ctrl+Enter saves · Esc cancels"));
+  setStatus(QStringLiteral("Enter saves · Shift+Enter newline · Esc cancels"));
   update();
 }
 
@@ -4097,7 +4083,7 @@ void CaptureEditor::editMarkerNote(int annotationIndex) {
   markerNoteEditor_->show();
   markerNoteEditor_->raise();
   markerNoteEditor_->setFocus(Qt::PopupFocusReason);
-  setStatus(QStringLiteral("Enter newline · Ctrl+Enter saves · Esc cancels"));
+  setStatus(QStringLiteral("Enter saves · Shift+Enter newline · Esc cancels"));
   update();
 }
 
@@ -4109,8 +4095,9 @@ void CaptureEditor::acceptMarkerNote() {
     markerNotePendingAnnotation_.text = text;
     selectedAnnotation_ = -1;
     selectedAnnotations_.clear();
-    setStatus(QStringLiteral("Marker %1 added · V for select mode")
-                  .arg(markerNotePendingAnnotation_.number));
+    setStatus(QStringLiteral("Marker %1 added · click to place %2")
+                  .arg(markerNotePendingAnnotation_.number)
+                  .arg(markerNotePendingAnnotation_.number + 1));
     commitAnnotate(std::move(markerNotePendingAnnotation_));
     markerNotePending_ = false;
   } else if (markerNoteEditingIndex_ >= 0 &&
@@ -4494,14 +4481,8 @@ void CaptureEditor::completeFinish(const FinishResult &result) {
 }
 
 void CaptureEditor::handleToolbar(const QString &action) {
-  if (markerNoteOpen()) {
-    if (action == QStringLiteral("marker-notes")) {
-      toggleMarkerNotesMode();
-      cancelMarkerNote();
-      return;
-    }
+  if (markerNoteOpen())
     cancelMarkerNote();
-  }
   const Tool toolBefore = tool_;
   const QString statusBefore = status_;
   if (action == QStringLiteral("tool-select"))
@@ -4520,10 +4501,6 @@ void CaptureEditor::handleToolbar(const QString &action) {
     activateHighlighter();
   else if (action == QStringLiteral("tool-marker"))
     tool_ = Tool::Marker;
-  else if (action == QStringLiteral("marker-notes")) {
-    toggleMarkerNotesMode();
-    return;
-  }
   else if (action == QStringLiteral("tool-rectangle") ||
            action == QStringLiteral("tool-ellipse") ||
            action == QStringLiteral("shape-rectangle") ||
@@ -4657,7 +4634,7 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
       event->accept();
       return;
     }
-    // Let the event filter handle Ctrl+Enter and plain Enter in the note editor.
+    // Let the event filter handle Enter and Shift+Enter in the note editor.
     QWidget::keyPressEvent(event);
     return;
   }
@@ -4861,8 +4838,7 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
         return;
       }
       if (annotations_.at(selectedAnnotation_).kind ==
-              Annotation::Kind::Marker &&
-          markerNotesMode_) {
+          Annotation::Kind::Marker) {
         tool_ = Tool::Select;
         editMarkerNote(selectedAnnotation_);
         update();
@@ -4930,9 +4906,6 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     activateHighlighter();
   } else if (event->key() == Qt::Key_C || event->key() == Qt::Key_M) {
     tool_ = Tool::Marker;
-  } else if (event->key() == Qt::Key_N && !event->modifiers()) {
-    toggleMarkerNotesMode();
-    return;
   } else if (event->key() == Qt::Key_R || event->key() == Qt::Key_E) {
     const bool rectangle = event->key() == Qt::Key_R;
     const Tool shape = rectangle ? Tool::Rectangle : Tool::Ellipse;
@@ -5909,8 +5882,7 @@ void CaptureEditor::mouseDoubleClickEvent(QMouseEvent *event) {
   tool_ = Tool::Select;
   if (annotations_.at(index).kind == Annotation::Kind::Text) {
     beginText({}, index);
-  } else if (annotations_.at(index).kind == Annotation::Kind::Marker &&
-             markerNotesMode_) {
+  } else if (annotations_.at(index).kind == Annotation::Kind::Marker) {
     editMarkerNote(index);
   } else {
     return;
@@ -6255,22 +6227,9 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
     }
   }
   if (tool_ == Tool::Marker) {
-    const QPointF placement = markerPlacementPoint(cursor_);
-    if (markerNotesMode_) {
-      beginMarkerNote(placement);
-    } else {
-      Annotation annotation;
-      annotation.kind = Annotation::Kind::Marker;
-      annotation.start = placement;
-      annotation.number = nextMarker_;
-      annotation.color = annotationColor();
-      annotation.size = annotationSize_;
-      selectedAnnotation_ = -1;
-      setStatus(QStringLiteral("Marker %1 added \u00b7 V for select mode")
-                    .arg(annotation.number));
-      commitAnnotate(std::move(annotation));
-      updatePointerCursor();
-    }
+    // The number tool is the directions tool: every placement opens the
+    // comment box, and Enter saves it and re-arms the next number.
+    beginMarkerNote(markerPlacementPoint(cursor_));
   } else if (tool_ == Tool::Text) {
     // A click places a one-line label; a drag draws a box whose height says
     // how many lines Enter may fill before it commits (see mouseReleaseEvent).

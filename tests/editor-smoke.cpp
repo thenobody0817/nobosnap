@@ -5193,9 +5193,9 @@ std::optional<QPointF> changedCenter(const QImage &before, const QImage &after,
 }
 
 /**
- * Number + directions: the toggle persists, placing a marker opens a focused
- * note dialog, Ctrl+Enter commits one undoable marker, and Esc cancels the
- * pending marker without adding a layer or consuming its number.
+ * Number + directions: the number tool always opens a focused comment box,
+ * Enter saves and re-arms the next number, Shift+Enter adds a line, and Esc
+ * cancels the pending marker without consuming its number.
  */
 bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
   CaptureData capture;
@@ -5216,14 +5216,6 @@ bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
   QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(700, 500));
   application.processEvents();
 
-  QTest::keyClick(&editor, Qt::Key_N);
-  application.processEvents();
-  if (!editor.statusForTest().contains(QStringLiteral("enabled")) ||
-      !loadMarkerNotesMode(defaultConfigPath())) {
-    error = QStringLiteral("N did not enable and persist number + directions");
-    return false;
-  }
-
   const QPointF origin = editor.editImageRectForTest().topLeft();
   const qreal scale = editor.editScaleForTest();
   const auto toScreen = [&](const QPointF &point) {
@@ -5234,27 +5226,36 @@ bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({200, 200}));
   application.processEvents();
   auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
-  if (!note || !editor.statusForTest().contains(QStringLiteral("Ctrl+Enter"))) {
-    error = QStringLiteral("A marker placed in notes mode did not open its "
-                           "directions dialog");
+  if (!note || !editor.statusForTest().contains(QStringLiteral("Enter saves"))) {
+    error = QStringLiteral("The number tool did not open its directions dialog");
     return false;
   }
-  QTest::keyClicks(note, QStringLiteral("Move this here"));
-  QTest::keyClick(note, Qt::Key_Return, Qt::ControlModifier);
+  // Shift+Enter keeps the dialog open and adds a line.
+  QTest::keyClicks(note, QStringLiteral("Move this"));
+  QTest::keyClick(note, Qt::Key_Return, Qt::ShiftModifier);
+  application.processEvents();
+  if (editor.annotationCountForTest() != 0 ||
+      QApplication::focusWidget() != note) {
+    error = QStringLiteral("Shift+Enter committed instead of adding a line");
+    return false;
+  }
+  QTest::keyClicks(note, QStringLiteral("beside Search"));
+  QTest::keyClick(note, Qt::Key_Return, Qt::NoModifier);
   application.processEvents();
   if (editor.annotationCountForTest() != 1 ||
+      editor.currentAnnotationsForTest().constFirst().number != 1 ||
       editor.currentAnnotationsForTest().constFirst().text !=
-          QStringLiteral("Move this here")) {
-    error = QStringLiteral("Ctrl+Enter did not commit the marker directions");
+          QStringLiteral("Move this\nbeside Search")) {
+    error = QStringLiteral("Enter did not save the marker directions");
     return false;
   }
 
-  // Esc cancels the pending marker, and the cancelled number is reused.
+  // Enter re-armed the tool: the next click opens number 2's dialog.
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({360, 300}));
   application.processEvents();
   note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
   if (!note) {
-    error = QStringLiteral("The second marker did not open its dialog");
+    error = QStringLiteral("The next number did not open its dialog");
     return false;
   }
   QTest::keyClick(note, Qt::Key_Escape);
@@ -5263,6 +5264,7 @@ bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
     error = QStringLiteral("Esc added the cancelled marker anyway");
     return false;
   }
+  // The cancelled number is reused, not skipped.
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({360, 300}));
   application.processEvents();
   note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
@@ -5271,19 +5273,11 @@ bool runMarkerNotesModeSmoke(QApplication &application, QString &error) {
     return false;
   }
   QTest::keyClicks(note, QStringLiteral("Second"));
-  QTest::keyClick(note, Qt::Key_Return, Qt::ControlModifier);
+  QTest::keyClick(note, Qt::Key_Return, Qt::NoModifier);
   application.processEvents();
   if (editor.annotationCountForTest() != 2 ||
       editor.currentAnnotationsForTest().constLast().number != 2) {
     error = QStringLiteral("Cancelling a marker consumed its number");
-    return false;
-  }
-
-  // Leave the shared smoke config the way it was found.
-  QTest::keyClick(&editor, Qt::Key_N);
-  application.processEvents();
-  if (loadMarkerNotesMode(defaultConfigPath())) {
-    error = QStringLiteral("N did not disable number + directions");
     return false;
   }
   editor.close();
@@ -5453,6 +5447,10 @@ bool runMarkerPointerOffsetSmoke(QApplication &application, QString &error) {
 
     QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, pointer);
     application.processEvents();
+    // The number tool opens its comment box; Enter saves the marker.
+    if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+      QTest::keyClick(note, Qt::Key_Return);
+    application.processEvents();
     const QVector<Operation> &ops = editor.operationLog();
     if (ops.isEmpty() || ops.constLast().type != Operation::Type::Annotate ||
         ops.constLast().annotations.size() != 1 ||
@@ -5578,11 +5576,20 @@ bool runContinuousAnnotationToolsSmoke(QApplication &application,
     return false;
   }
 
+  int markersPlaced = 0;
   for (const auto &[x, y] :
        {std::pair{200, 300}, std::pair{250, 300}, std::pair{300, 300}}) {
     QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(x, y));
     application.processEvents();
-    if (editor.armedToolForTest() != CaptureEditor::Tool::Marker) {
+    auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget());
+    if (!note) {
+      error = QStringLiteral("Number tool did not open its dialog");
+      return false;
+    }
+    QTest::keyClick(note, Qt::Key_Return);
+    application.processEvents();
+    if (editor.armedToolForTest() != CaptureEditor::Tool::Marker ||
+        editor.annotationCountForTest() != ++markersPlaced) {
       error = QStringLiteral("Marker tool did not remain active after click");
       return false;
     }
@@ -6568,6 +6575,9 @@ bool runOpLogCapKeepsLeadingCrop(QApplication &application, QString &error) {
   QTest::keyClick(&editor, Qt::Key_C);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(400, 300));
   application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
+  application.processEvents();
 
   if (editor.operationLog().size() != 100 ||
       editor.operationLog().constFirst().type != Operation::Type::Crop ||
@@ -7431,6 +7441,9 @@ bool runOffCanvasCreationSmoke(QApplication &application, QString &error) {
     return false;
   }
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, outside);
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
   application.processEvents();
   if (editor.currentAnnotationsForTest().size() != 1 ||
       editor.currentAnnotationsForTest().constFirst().kind !=
@@ -9832,7 +9845,14 @@ bool runSelectAllDeleteSmoke(QApplication &application, QString &error) {
   drag(QPoint(450, 212), QPoint(650, 312));
   QTest::keyClick(&editor, Qt::Key_M);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(250, 412));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
+  application.processEvents();
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(350, 412));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
   application.processEvents();
   const QVector<Annotation> all = {
       layer(Annotation::Kind::Rectangle, {100, 95}, {300, 195}),
@@ -9899,6 +9919,9 @@ bool runSelectAllDeleteSmoke(QApplication &application, QString &error) {
   QTest::keyClick(&editor, Qt::Key_Backspace);
   QTest::keyClick(&editor, Qt::Key_M);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(300, 312));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
   application.processEvents();
   if (!snapshotMatches(
           expected({layer(Annotation::Kind::Marker, {191, 186}, {}, 1)}))) {
@@ -10268,6 +10291,10 @@ bool runDuplicateLayerSmoke(QApplication &application, QString &error) {
   application.processEvents();
   QTest::keyClick(&editor, Qt::Key_C);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(600, 212));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
+  application.processEvents();
   QTest::keyClick(&editor, Qt::Key_V);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(600, 212));
   QTest::keyClick(&editor, Qt::Key_D, Qt::AltModifier);
@@ -10999,6 +11026,10 @@ bool runHoverMoveSmoke(QApplication &application, QString &error) {
     }
     QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(420, 370));
     application.processEvents();
+    // The number tool opens its comment box; Enter saves the counter.
+    if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+      QTest::keyClick(note, Qt::Key_Return);
+    application.processEvents();
     if (editor.annotationCountForTest() != layersBeforeMarker + 1) {
       error = QStringLiteral("A counter on top of a layer did not go down");
       return false;
@@ -11108,6 +11139,9 @@ bool runLayerOrderSmoke(QApplication &application, QString &error) {
   QTest::keyClick(&editor, Qt::Key_C);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(620, 211));
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(620, 211));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
   application.processEvents();
   const QPoint counterCenter(511, 86);
   const QColor counterInk =
@@ -13332,6 +13366,9 @@ int main(int argc, char **argv) {
   QTest::keyClick(&editor, Qt::Key_C);
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(470, 300));
   application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
+  application.processEvents();
   if (editor.armedToolForTest() != CaptureEditor::Tool::Marker ||
       flushedSnapshot(editor, snapshotPath) == beforeMarkerSnapshot)
     return 48;
@@ -13762,6 +13799,10 @@ int main(int argc, char **argv) {
   QTest::keyClick(&previewClipEditor, Qt::Key_C);
   QTest::mouseClick(&previewClipEditor, Qt::LeftButton, Qt::NoModifier,
                     QPoint(640, 312));
+  application.processEvents();
+  if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+    QTest::keyClick(note, Qt::Key_Return);
+  application.processEvents();
   QTest::keyClick(&previewClipEditor, Qt::Key_B);
   QTest::mousePress(&previewClipEditor, Qt::LeftButton, Qt::NoModifier,
                     QPoint(682, 317));
@@ -14032,6 +14073,9 @@ int main(int argc, char **argv) {
     QTest::keyClick(&finishEditor, Qt::Key_C);
     QTest::mouseClick(&finishEditor, Qt::LeftButton, Qt::NoModifier,
                       QPoint(470, 312));
+    application.processEvents();
+    if (auto *note = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget()))
+      QTest::keyClick(note, Qt::Key_Return);
     application.processEvents();
     const QImage snapshotBeforeSave =
         flushedSnapshot(finishEditor, snapshotPath)
